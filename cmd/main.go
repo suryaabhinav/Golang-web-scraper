@@ -10,23 +10,55 @@ import (
 
 func main() {
 	config := pkg.DefaultConfig()
-	content, err := pkg.ScrapeURL("https://medium.com/data-science-at-microsoft/how-large-language-models-work-91c362f5b78f", config)
-	if err != nil {
-		log.Fatal(err)
+
+	urls := []string{
+		"https://medium.com/data-science-at-microsoft/how-large-language-models-work-91c362f5b78f",
+		"https://www.reddit.com/r/golang/comments/1bdp1ku/hugot_hugginface_transformer_pipelines_for_golang/",
+		"https://sbert.net",
+		"https://medium.com/@denhox/sharing-data-between-microservices-fe7fb9471208",
+		"https://medium.com/data-science-collective/the-open-source-stack-for-ai-agents-8ab900e33676",
 	}
 
-	singleString := createSingleString(*content)
-
-	fmt.Println(singleString)
-
-	embeddingsConfig := pkg.DefaultEmbeddingConfig()
-	chunk := singleString
-	embeddings, err := pkg.GenerateEmbeddings(chunk, embeddingsConfig)
-	if err != nil {
-		fmt.Printf("Error generating embeddings: %v\n", err)
-		return
+	results := pkg.ScrapeURLsConcurrently(urls, config, 5)
+	for _, content := range results {
+		if content != nil {
+			fmt.Println(createSingleString(*content))
+			fmt.Println("Results Generated")
+		} else {
+			log.Println("Failed to scrape a URL")
+		}
 	}
-	fmt.Println(embeddings)
+
+	// var wg sync.WaitGroup
+
+	// for _, content := range results {
+	// 	if content != nil {
+	// 		wg.Add(1)
+
+	// 		go func(o pkg.ScrapedContent) {
+	// 			defer wg.Done()
+	// 			embeddings, err := pkg.GenerateEmbeddings(o)
+	// 			if err != nil {
+	// 				log.Fatalf("Failed to generate embedding: %v", err)
+	// 			}
+
+	// 			for _, embedding := range embeddings {
+	// 				// fmt.Printf("Embedding %d: %v\n", i, embedding)
+	// 				if embedding != nil {
+
+	// 				} else {
+	// 					log.Println("Failed to generate embeddings")
+	// 				}
+
+	// 			}
+	// 		}(*content)
+
+	// 		wg.Wait()
+	// 		fmt.Println("Embeddings Done")
+
+	// 	}
+	// }
+
 }
 
 func createSingleString(content pkg.ScrapedContent) string {

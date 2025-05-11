@@ -1,95 +1,149 @@
 package pkg
 
 import (
-	"bytes"
-	"encoding/json"
+	"context"
+	"flag"
 	"fmt"
-	"io"
-	"net/http"
-	"time"
+	"log"
+	"strings"
+	"sync"
+
+	"github.com/milosgajdos/go-embeddings/ollama"
 )
 
-// EmbeddingRequest represents the input payload for generating embeddings
-type EmbeddingRequest struct {
-	Model  string `json:"model"`
-	Prompt string `json:"prompt"`
+// // ScrapedContent represents the structure of scraped web content
+// type ScrapedContent struct {
+// 	Title       string
+// 	Description string
+// 	Headers     []string
+// 	Paragraphs  []string
+// 	Links       []string
+// }
+
+var (
+	model string
+	debug bool
+)
+
+func init() {
+	flag.StringVar(&model, "model", "llama3", "Ollama model name")
+	flag.BoolVar(&debug, "debug", false, "Enable debug logging")
 }
 
-// EmbeddingResponse represents the output from the embedding generation
-type EmbeddingResponse struct {
-	Embeddings [][]float64 `json:"embeddings"`
-	Error      string      `json:"error,omitempty"`
+// chunkContent breaks down the scraped content into manageable chunks
+func chunkContent(content ScrapedContent, maxChunkSize int) []string {
+	chunks := []string{}
+
+	// Add title and description as initial chunks
+	if content.Title != "" {
+		chunks = append(chunks, content.Title)
+	}
+	if content.Description != "" {
+		chunks = append(chunks, content.Description)
+	}
+
+	// Add headers
+	chunks = append(chunks, content.Headers...)
+
+	// Break paragraphs into chunks
+	for _, paragraph := range content.Paragraphs {
+		// If paragraph is longer than maxChunkSize, split it
+		if len(paragraph) > maxChunkSize {
+			words := strings.Split(paragraph, " ")
+			currentChunk := ""
+			for _, word := range words {
+				if len(currentChunk+" "+word) > maxChunkSize {
+					chunks = append(chunks, strings.TrimSpace(currentChunk))
+					currentChunk = word
+				} else {
+					currentChunk += " " + word
+				}
+			}
+			if currentChunk != "" {
+				chunks = append(chunks, strings.TrimSpace(currentChunk))
+			}
+		} else {
+			chunks = append(chunks, paragraph)
+		}
+	}
+
+	return chunks
 }
 
-// EmbeddingConfig holds the configuration for the embedding generation process
-type EmbeddingConfig struct {
-	BaseURL   string
-	ModelName string
-	Timeout   time.Duration
-}
+// GenerateEmbeddings generates embeddings for scraped content concurrently
+func GenerateEmbeddings(content ScrapedContent) ([][]float32, error) {
+	flag.Parse()
 
-// DefaultEmbeddingConfig returns the default configuration for the embedding service
-func DefaultEmbeddingConfig() *EmbeddingConfig {
-	return &EmbeddingConfig{
-		BaseURL:   "http://localhost:11434/api/embeddings",
-		ModelName: "llama3",
-		Timeout:   30 * time.Second,
-	}
-}
-
-// GenerateEmbeddings sends a REST API request to generate embeddings for the given text chunk
-func GenerateEmbeddings(chunk string, config *EmbeddingConfig) ([][]float64, error) {
-	if config == nil {
-		config = DefaultEmbeddingConfig()
+	if model == "" {
+		return nil, fmt.Errorf("missing Ollama model")
 	}
 
-	// Create the request payload
-	payload := EmbeddingRequest{
-		Model:  config.ModelName,
-		Prompt: chunk,
+	// Chunk the content
+	chunks := chunkContent(content, 1024) // 1024 is an example max chunk size
+
+	// Prepare for concurrent processing
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	allEmbeddings := make([][]float32, len(chunks))
+	errorChan := make(chan error, len(chunks))
+
+	// Create Ollama client
+	c := ollama.NewClient()
+
+	// Process chunks concurrently
+	for i, chunk := range chunks {
+		wg.Add(1)
+		go func(index int, text string) {
+			defer wg.Done()
+
+			embReq := &ollama.EmbeddingRequest{
+				Prompt: text,
+				Model:  model,
+			}
+
+			embs, err := c.Embed(context.Background(), embReq)
+			if err != nil {
+				if debug {
+					log.Printf("Error generating embedding for chunk %d: %v", index, err)
+				}
+				errorChan <- err
+				return
+			}
+
+			mu.Lock()
+			flattenedEmbs := []float32{}
+			for _, emb := range embs {
+				for _, v := range emb.Vector {
+					flattenedEmbs = append(flattenedEmbs, float32(v))
+				}
+			}
+			allEmbeddings[index] = flattenedEmbs
+			mu.Unlock()
+		}(i, chunk)
 	}
 
-	requestBody, err := json.Marshal(payload)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal embedding request: %w", err)
+	// Wait for all goroutines to complete
+	wg.Wait()
+
+	// Check for any errors
+	select {
+	case err := <-errorChan:
+		return nil, err
+	default:
+		// No errors
 	}
 
-	// Create an HTTP client
-	client := &http.Client{
-		Timeout: config.Timeout,
+	// Filter out any nil embeddings
+	var filteredEmbeddings [][]float32
+	for _, emb := range allEmbeddings {
+		if emb != nil {
+			filteredEmbeddings = append(filteredEmbeddings, emb)
+		}
 	}
 
-	// Make the POST request
-	req, err := http.NewRequest("POST", config.BaseURL, bytes.NewBuffer(requestBody))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create embedding request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("embedding request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	// Read and parse the response
-	responseBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read embedding response: %w", err)
+	if debug {
+		fmt.Printf("Generated %d embeddings from %d chunks\n", len(filteredEmbeddings), len(chunks))
 	}
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("embedding service returned status %d: %s", resp.StatusCode, string(responseBody))
-	}
-
-	var embeddingResponse EmbeddingResponse
-	if err := json.Unmarshal(responseBody, &embeddingResponse); err != nil {
-		return nil, fmt.Errorf("failed to parse embedding response: %w", err)
-	}
-
-	if embeddingResponse.Error != "" {
-		return nil, fmt.Errorf("embedding service error: %s", embeddingResponse.Error)
-	}
-
-	return embeddingResponse.Embeddings, nil
+	return filteredEmbeddings, nil
 }

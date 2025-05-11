@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gocolly/colly"
@@ -98,14 +99,6 @@ func ScrapeURL(url string, config *ScrapeConfig) (*ScrapedContent, error) {
 		}
 	})
 
-	// Extract links
-	// c.OnHTML("a[href]", func(e *colly.HTMLElement) {
-	// 	href := e.Request.AbsoluteURL(e.Attr("href"))
-	// 	if href != "" {
-	// 		content.Links = append(content.Links, href)
-	// 	}
-	// })
-
 	// Error handling
 	c.OnError(func(r *colly.Response, err error) {
 		log.Printf("Error scraping %s: %v", r.Request.URL, err)
@@ -135,4 +128,54 @@ func cleanText(text string) string {
 	).Replace(text)
 
 	return text
+}
+
+// ScrapeURLsConcurrently scrapes multiple URLs concurrently and returns their content
+func ScrapeURLsConcurrently(urls []string, config *ScrapeConfig, numWorkers int) []*ScrapedContent {
+	if config == nil {
+		config = DefaultConfig()
+	}
+
+	urlChan := make(chan string, len(urls))
+	resultChan := make(chan *ScrapedContent, len(urls))
+	var wg sync.WaitGroup
+
+	// Worker function
+	worker := func() {
+		defer wg.Done()
+		for url := range urlChan {
+			content, err := ScrapeURL(url, config)
+			if err != nil {
+				log.Printf("Failed to scrape URL %s: %v", url, err)
+				continue
+			}
+			resultChan <- content
+		}
+	}
+
+	// Start workers
+	for i := 0; i < numWorkers; i++ {
+		wg.Add(1)
+		go worker()
+	}
+
+	// Send URLs to the channel
+	for _, url := range urls {
+		urlChan <- url
+	}
+	close(urlChan)
+
+	// Wait for all workers to finish
+	go func() {
+		wg.Wait()
+		close(resultChan)
+	}()
+
+	// Collect results
+	var results []*ScrapedContent
+	for content := range resultChan {
+		results = append(results, content)
+	}
+
+	return results
 }
